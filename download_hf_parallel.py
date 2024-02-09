@@ -7,9 +7,10 @@ from typing import List, Optional, Tuple
 import logging
 import requests
 import os
+import threading
 
 log_file = "download_hf_parallel.log"
-logging.basicConfig(filename=log_file, level=logging.INFO)
+logging.basicConfig(filename=log_file, level=logging.INFO,encoding='utf-8', filemode='w')
 
 def check_file_size_local(file_path, file_size) -> bool:
     """
@@ -21,6 +22,7 @@ def check_file_size_local(file_path, file_size) -> bool:
         return False
     # remove the file if the size is not correct
     if os.path.getsize(file_path) != file_size:
+        logging.error(f"File {file_path} is not complete, required size {file_size}, actual size {os.path.getsize(file_path)}")
         os.remove(file_path)
         return False
     return True
@@ -32,6 +34,7 @@ def download_chunk(url, start, end, path):
     headers = {'Range': f'bytes={start}-{end}'}
     try:
         r = requests.get(url, headers=headers, stream=True)
+        r.raise_for_status()
         with open(path, 'wb') as f:
             for chunk in r.iter_content(chunk_size=8192):
                 f.write(chunk)
@@ -73,9 +76,13 @@ def generate_requests_for_chunks(repository: str, filename: str, chunk_size: int
     file_names = [f"{download_path}/{filename}_{i}" for i in range(num_chunks)]
     file_sizes = [chunk_size for _ in range(num_chunks)]
     file_sizes[-1] = total_size - (num_chunks - 1) * chunk_size
+    if file_sizes[-1] <= 0:
+        file_sizes.pop()
+        file_names.pop()
+        num_chunks -= 1
     for i, (file_name, file_size) in enumerate(zip(file_names, file_sizes)):
         if not check_file_size_local(file_name, file_size):
-            requests_list.append((url, i * chunk_size, (i + 1) * chunk_size - 1, file_name))
+            requests_list.append((url, i * chunk_size, min((i + 1) * chunk_size - 1, file_size + i * chunk_size - 1), file_name))
     return requests_list, num_chunks, total_size
 
 def merge_chunks(file_name, required_chunk_count, download_path, required_size) -> Optional[str]:
@@ -104,7 +111,7 @@ if __name__ == "__main__":
     parser.add_argument("--repo_type", type=str, help="Repository type", default="dataset")
     parser.add_argument("--download_path", type=str, help="Path to download the files", default="G:/Danbooru-images-latents")
     parser.add_argument("--chunk_size", type=int, help="Chunk size in bytes, WARNING : If you change this, previous downloaded state will be lost", default=CHUNK_SIZE)
-    parser.add_argument("--retry_count", type=int, help="Number of retries for file download", default=3)
+    #parser.add_argument("--retry_count", type=int, help="Number of retries for file download", default=3)
     args = parser.parse_args()
     api = HfApi()
     repository = args.repo_id
@@ -113,21 +120,13 @@ if __name__ == "__main__":
         repo_type=args.repo_type
     ))
     download_path = args.download_path # Path to download the files
-    # Assume the functions `generate_requests_for_chunks`, `download_chunks_parallel`, and `merge_chunks` are defined as described in the previous response.
     CHUNK_SIZE = 1024 * 1024 * 10  # 10MB
     for file in tqdm(files_list, desc="Downloading files"):
-        for i in range(args.retry_count):
-            requests_list, num_chunks, total_size = generate_requests_for_chunks(repository, file, CHUNK_SIZE, download_path, repo_type=args.repo_type)
-            if requests_list:  # Proceed only if there are chunks to download
-                download_chunks_parallel(requests_list)
-                result = merge_chunks(file, num_chunks, download_path, total_size)
-                if result:
-                    break
-                else:
-                    logging.error(f"Error in merging chunks for file {file}, retrying {i+1}/{args.retry_count}")
-            else:
-                logging.info(f"File {file} already exists, skipping download")
-                break
+        requests_list, num_chunks, total_size = generate_requests_for_chunks(repository, file, CHUNK_SIZE, download_path, repo_type=args.repo_type)
+        if requests_list:  # Proceed only if there are chunks to download
+            download_chunks_parallel(requests_list)
+            #merge_chunks(file, num_chunks, download_path, total_size)
+            threading.Thread(target=merge_chunks, args=(file, num_chunks, download_path, total_size)).start()
         else:
-            logging.error(f"Failed to download file {file} after {args.retry_count} retries")
+            logging.info(f"File {file} already exists, skipping download")
     input("Press Enter to continue...")
