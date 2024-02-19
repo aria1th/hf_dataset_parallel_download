@@ -72,6 +72,8 @@ CHUNK_SIZE = 1024 * 1024 * 10  # 10MB
 def generate_requests_for_chunks(repository: str, filename: str, chunk_size: int, download_path: str, repo_type:str = "dataset", result_dir:str = None
                                  ) -> Tuple[List[Tuple[str, int, int, str]], int, int]:
     url = f"https://huggingface.co/{repo_type}s/{repository}/resolve/main/{filename}"
+    if repo_type == "model":
+        url = f"https://huggingface.co/{repository}/resolve/main/{filename}"
     if TOKEN:
         headers = {'Authorization': f"Bearer {TOKEN}"}
     else:
@@ -150,8 +152,9 @@ if __name__ == "__main__":
     #parser.add_argument("--retry_count", type=int, help="Number of retries for file download", default=3)
     args = parser.parse_args()
     if args.auth_token:
+        print("Using auth token")
         TOKEN = args.auth_token
-    api = HfApi()
+    api = HfApi(token=TOKEN)
     repository = args.repo_id
     files_list = (api.list_repo_files(
         repo_id=repository,
