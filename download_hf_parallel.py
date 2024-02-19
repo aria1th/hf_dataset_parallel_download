@@ -9,6 +9,8 @@ import requests
 import os
 import threading
 
+TOKEN = ""
+
 log_file = "download_hf_parallel.log"
 logging.basicConfig(filename=log_file, level=logging.INFO,encoding='utf-8', filemode='w')
 
@@ -32,6 +34,8 @@ def download_chunk(url, start, end, path):
         logging.info(f"File {path} already exists, skipping download")
         return path
     headers = {'Range': f'bytes={start}-{end}'}
+    if TOKEN:
+        headers['Authorization'] = f"Bearer {TOKEN}"
     for _i in range(3):
         try:
             r = requests.get(url, headers=headers, allow_redirects=True, timeout=10)
@@ -68,7 +72,11 @@ CHUNK_SIZE = 1024 * 1024 * 10  # 10MB
 def generate_requests_for_chunks(repository: str, filename: str, chunk_size: int, download_path: str, repo_type:str = "dataset", result_dir:str = None
                                  ) -> Tuple[List[Tuple[str, int, int, str]], int, int]:
     url = f"https://huggingface.co/{repo_type}s/{repository}/resolve/main/{filename}"
-    response = requests.head(url, allow_redirects=True)
+    if TOKEN:
+        headers = {'Authorization': f"Bearer {TOKEN}"}
+    else:
+        headers = {}
+    response = requests.head(url, allow_redirects=True, headers=headers)
     total_size = int(response.headers.get('content-length', 0))
     # check if file already exists and has the correct size
     if check_file_size_local(f"{download_path}/{filename}", total_size) or (result_dir and check_file_size_local(f"{result_dir}/{filename}", total_size)):
@@ -136,10 +144,13 @@ if __name__ == "__main__":
     parser.add_argument("--repo_type", type=str, help="Repository type", default="dataset")
     parser.add_argument("--download_path", type=str, help="Path to download the files", default="G:/Danbooru-images-latents")
     # cache_dir
-    parser.add_argument("--cache_dir", type=str, help="Cache directory", default="D:/Danbooru-images-latents")
+    parser.add_argument("--cache_dir", type=str, help="Cache directory", default="F:/Danbooru-images-latents")
     parser.add_argument("--chunk_size", type=int, help="Chunk size in bytes, WARNING : If you change this, previous downloaded state will be lost", default=CHUNK_SIZE)
+    parser.add_argument("--auth_token", type=str, help="Hugging Face API token", default="")
     #parser.add_argument("--retry_count", type=int, help="Number of retries for file download", default=3)
     args = parser.parse_args()
+    if args.auth_token:
+        TOKEN = args.auth_token
     api = HfApi()
     repository = args.repo_id
     files_list = (api.list_repo_files(
