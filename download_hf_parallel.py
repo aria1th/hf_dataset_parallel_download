@@ -10,7 +10,6 @@ import os
 import threading
 import tarfile
 TOKEN = ""
-
 log_file = "download_hf_parallel.log"
 logging.basicConfig(filename=log_file, level=logging.INFO,encoding='utf-8', filemode='w')
 
@@ -43,11 +42,15 @@ def download_chunk(url, start, end, path):
         try:
             r = requests.get(url, headers=headers, allow_redirects=True, stream=True)
             r.raise_for_status()
+            total_wrote = 0
             with open(path, 'wb') as f:
                 for chunk in r.iter_content(chunk_size=8192):
                     f.write(chunk)
                     if should_use_pbar:
                         pbar.update(len(chunk))
+                    total_wrote += len(chunk)
+                    if total_wrote > end - start + 1:
+                        raise Exception(f"Downloaded more than expected for {path}")
             # check if the file is downloaded correctly
             if not check_file_size_local(path, end - start + 1):
                 print(f"File {path} is not downloaded correctly, expected size {end - start + 1}, actual size {os.path.getsize(path)}.. retrying {_i+1}..")
@@ -56,6 +59,7 @@ def download_chunk(url, start, end, path):
             return path
         except Exception as e:
             logging.error(f"Error downloading chunk {path}: {str(e)}")
+            pbar.reset()
     return None
 
 def download_chunks_parallel(requests_list):
@@ -135,7 +139,7 @@ def auto_untar(file_path, dest_dir, remove_after_untar=False):
         file_base = os.path.basename(file_path)
         file_base = file_base[:file_base.rfind(".")]
         os.makedirs(dest_dir + "/" + file_base, exist_ok=True)
-        with tarfile.open(file_path, "r") as tar:
+        with tarfile.open(file_path, "r", dereference=True) as tar:
             tar.extractall(dest_dir + "/" + file_base)
         print(f"Untarred {file_path} to {dest_dir + '/' + file_base}")
         logging.info(f"Untarred {file_path} to {dest_dir + '/' + file_base}")
@@ -151,11 +155,6 @@ def download_for_file(repository, file, chunk_size, download_path, repo_type, re
         pbar.update(1)
         if os.path.exists(f"{download_path}/{file}") or (result_dir and os.path.exists(f"{result_dir}/{file}")):
             # auto untar
-            if auto_untar_dir:
-                filepath = f"{download_path}/{file}" if not result_dir else f"{result_dir}/{file}"
-                print(f"Auto untarring {filepath} to {auto_untar_dir}")
-                auto_untar(filepath, auto_untar_dir, remove_after_untar)
-                return None
             return f"{download_path}/{file}" if not result_dir else f"{result_dir}/{file}"
         else:
             return None
@@ -168,12 +167,16 @@ def download_for_file(repository, file, chunk_size, download_path, repo_type, re
                 merge_result = merge_chunks(file, num_chunks, download_path, total_size, result_dir)
                 if merge_result:
                     pbar.update(1)
+                    with open(fully_finished_files_path, "a", encoding="utf-8") as f:
+                        f.write(f"{file}\n")
                     return merge_result
                 else:
                     print(f"Error in merging chunks for {file}, retrying {_i+1}..")
                     logging.error(f"Error in merging chunks for {file}, retrying {_i+1}..")
             else:
                 print(f"Downloaded {file} in {download_path} without splitting into chunks")
+                with open(fully_finished_files_path, "a", encoding="utf-8") as f:
+                    f.write(f"{file}\n")
                 pbar.update(1)
                 return f"{download_path}/{file}"
         else:
@@ -182,10 +185,6 @@ def download_for_file(repository, file, chunk_size, download_path, repo_type, re
                 f.write(f"{file}\n")
             pbar.update(1)
             filepath = f"{download_path}/{file}" if not result_dir else f"{result_dir}/{file}"
-            if auto_untar_dir:
-                print(f"Auto untarring {filepath} to {auto_untar_dir}")
-                auto_untar(filepath, auto_untar_dir, remove_after_untar)
-                return None
             return filepath
 if __name__ == "__main__":
     import argparse
@@ -194,7 +193,7 @@ if __name__ == "__main__":
     parser.add_argument("--repo_type", type=str, help="Repository type", default="dataset")
     parser.add_argument("--download_path", type=str, help="Path to download the files", default="G:/Danbooru-images-latents")
     # cache_dir
-    parser.add_argument("--cache_dir", type=str, help="Cache directory", default="F:/Danbooru-images-latents")
+    parser.add_argument("--cache_dir", type=str, help="Cache directory", default=None)
     parser.add_argument("--chunk_size", type=int, help="Chunk size in bytes, WARNING : If you change this, previous downloaded state will be lost", default=CHUNK_SIZE)
     parser.add_argument("--auth_token", type=str, help="Hugging Face API token", default="")
     parser.add_argument("--no_chunks", action="store_true", help="Download the file without splitting into chunks", default=False)
@@ -204,6 +203,11 @@ if __name__ == "__main__":
     parser.add_argument("--remove_after_untar", action="store_true", help="Remove the tar file after untarring", default=False)
     #parser.add_argument("--retry_count", type=int, help="Number of retries for file download", default=3)
     args = parser.parse_args()
+    # make paths absolute
+    args.download_path = os.path.abspath(args.download_path)
+    args.cache_dir = os.path.abspath(args.cache_dir) if args.cache_dir else None
+    args.auto_untar_dir = os.path.abspath(args.auto_untar_dir)
+    
     if args.auth_token:
         print("Using auth token")
         TOKEN = args.auth_token
@@ -223,13 +227,41 @@ if __name__ == "__main__":
     download_path = args.download_path
     CHUNK_SIZE = 1024 * 1024 * 100  # 100MB
     jobs = []
-    with ThreadPoolExecutor(max_workers=32) as executor:
+    untar_jobs = []
+    with ThreadPoolExecutor(max_workers=8) as executor:
         pbar = tqdm(total=len(files_list), desc="Downloading files")
-        for file in files_list:
-            #download_for_file(repository, file, CHUNK_SIZE, args.cache_dir or download_path, args.repo_type, download_path)
-            jobs.append(executor.submit(download_for_file, repository, file, CHUNK_SIZE, args.cache_dir or download_path, args.repo_type, download_path, pbar, args.no_chunks, args.auto_untar_dir, args.remove_after_untar))
-        for job in as_completed(jobs):
-            result = job.result()
-            if result:
-                print(f"Downloaded {result} successfully")
-                logging.info(f"Downloaded {result} successfully")
+        with ThreadPoolExecutor(max_workers=16) as executor_unzip:
+            for file in files_list:
+                #download_for_file(repository, file, CHUNK_SIZE, args.cache_dir or download_path, args.repo_type, download_path)
+                jobs.append(executor.submit(download_for_file, repository, file, CHUNK_SIZE, args.cache_dir or download_path, args.repo_type, download_path, pbar, args.no_chunks, args.auto_untar_dir, args.remove_after_untar))
+            for job in as_completed(jobs):
+                result = job.result()
+                if result:
+                    print(f"Downloaded {result} successfully")
+                    logging.info(f"Downloaded {result} successfully")
+                    if args.auto_untar_dir:
+                        print(f"Auto untarring {result}..")
+                        logging.info(f"Auto untarring {result}..")
+                        #auto_untar(result, args.auto_untar_dir, args.remove_after_untar)
+                        untar_jobs.append(executor_unzip.submit(auto_untar, result, args.auto_untar_dir, args.remove_after_untar))
+            for job in as_completed(untar_jobs):
+                result = job.result()
+                if result:
+                    print(f"Untarred {result} successfully")
+                    logging.info(f"Untarred {result} successfully")
+            for job in as_completed(jobs):
+                result = job.result()
+                if result:
+                    print(f"Downloaded {result} successfully")
+                    logging.info(f"Downloaded {result} successfully")
+                    if args.auto_untar_dir:
+                        print(f"Auto untarring {result}..")
+                        logging.info(f"Auto untarring {result}..")
+                        #auto_untar(result, args.auto_untar_dir, args.remove_after_untar)
+                        untar_jobs.append(executor_unzip.submit(auto_untar, result, args.auto_untar_dir, args.remove_after_untar))
+            for job in as_completed(untar_jobs):
+                result = job.result()
+                if result:
+                    print(f"Untarred {result} successfully")
+                    logging.info(f"Untarred {result} successfully")
+        pbar.close()
